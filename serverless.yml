@@ -1,0 +1,221 @@
+org: inmergion
+service: reto-zoluxiones
+
+stages:
+  default:
+    params:
+      tableName: "medical_appointments-${sls:stage}"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - Fn::GetAtt: [MedicalAppointmentsTable, Arn]
+            - Fn::Join:
+                - "/"
+                - - Fn::GetAtt: [MedicalAppointmentsTable, Arn]
+                  - "/*"
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            - Ref: MedicalAppointmentTopic
+
+  environment:
+    AWS_ACCOUNT_ID: ${aws:accountId}
+    MEDICAL_APPOINTMENTS_TABLE: medical_appointments-${sls:stage}
+    MEDICAL_APPOINTMENT_TOPIC_ARN: arn:aws:sns:${self:provider.region}:${aws:accountId}:MedicalAppointmentTopic
+    EVENT_BUS_NAME: MedicalAppointmentEvenBus
+    MYSQL_PE_HOST: ${env:dbhost}
+    MYSQL_PE_USER: ${env:masterusername}
+    MYSQL_PE_PASSWORD: ${env:password}
+    MYSQL_PE_DATABASE: medical_appointments_pe
+    MYSQL_CL_HOST: ${env:dbhost}
+    MYSQL_CL_USER: ${env:masterusername}
+    MYSQL_CL_PASSWORD: ${env:password}
+    MYSQL_CL_DATABASE: medical_appointments_cl
+
+functions:
+  medical_appointment:
+    handler: src/medical-appointment/infrastructure/handlers/medical_appointment/handler.handler
+    events:
+      - http:
+          method: POST
+          path: /medical-appointments
+      - http:
+          method: GET
+          path: /medical-appointments/{id}
+
+    environment:
+      MEDICAL_APPOINTMENTS_TABLE: ${param:tableName}
+
+  medical_appointment_pe:
+    handler: src/medical-appointment/infrastructure/handlers/medical_appointment_pe/handler.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - MedicalAppointmentQueuePE
+              - Arn
+
+  medical_appointment_cl:
+    handler: src/medical-appointment/infrastructure/handlers/medical_appointment_cl/handler.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - MedicalAppointmentQueueCL
+              - Arn
+
+resources:
+  Resources:
+    MedicalAppointmentTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: MedicalAppointmentTopic
+
+    MedicalAppointmentQueuePE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: medical-appointment-queue-pe
+
+    MedicalAppointmentQueueCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: medical-appointment-queue-cl
+
+    MedicalAppointmentSubscriptionPE:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: sqs
+        TopicArn:
+          Ref: MedicalAppointmentTopic
+        Endpoint:
+          Fn::GetAtt:
+            - MedicalAppointmentQueuePE
+            - Arn
+        FilterPolicy:
+          appointmentType:
+            - "PE"
+    MedicalAppointmentSubscriptionCL:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: sqs
+        TopicArn:
+          Ref: MedicalAppointmentTopic
+        Endpoint:
+          Fn::GetAtt:
+            - MedicalAppointmentQueueCL
+            - Arn
+        FilterPolicy:
+          appointmentType:
+            - "CL"
+
+    SqsCompletedMedicalAppointment:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: completed-medical-appointment
+
+    AppointmentCompleteRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName:
+          Ref: MedicalAppointmentEvenBus
+        EventPattern:
+          source:
+            - "medical.appointment"
+          detail-type:
+            - "MedicalAppointmentCompleted"
+        Targets:
+          - Arn:
+              Fn::GetAtt:
+                - SqsCompletedMedicalAppointment
+                - Arn
+            Id: "CompletedMedicalAppointmentTarget"
+
+    PermissionForEventsToSendToSQS:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: SqsCompletedMedicalAppointment
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                Service: "events.amazonaws.com"
+              Action: "sqs:SendMessage"
+              Resource:
+                Fn::GetAtt:
+                  - SqsCompletedMedicalAppointment
+                  - Arn
+
+    MedicalAppointmentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: medical_appointments-${sls:stage}
+        GlobalSecondaryIndexes:
+          - IndexName: InsuredIdIndex
+            KeySchema:
+              - AttributeName: insuredId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    MedicalAppointmentEvenBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: MedicalAppointmentEvenBus
+
+    SQSPolicyPE:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: MedicalAppointmentQueuePE
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowSNSMessagesPE
+              Effect: Allow
+              Principal: "*"
+              Action: SQS:SendMessage
+              Resource: !GetAtt MedicalAppointmentQueuePE.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref MedicalAppointmentTopic
+
+    SQSPolicyCL:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: MedicalAppointmentQueueCL
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowSNSMessagesCL
+              Effect: Allow
+              Principal: "*"
+              Action: SQS:SendMessage
+              Resource: !GetAtt MedicalAppointmentQueueCL.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref MedicalAppointmentTopic
