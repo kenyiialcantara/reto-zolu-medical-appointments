@@ -22,11 +22,11 @@ provider:
             - dynamodb:UpdateItem
             - dynamodb:DeleteItem
           Resource:
-            - Fn::GetAtt: [MedicalAppointmentsTable, Arn]
+            - Fn::GetAtt: [MedicalAppointmentsTable, Arn] # tabla principal
             - Fn::Join:
-                - "/"
+                - ""
                 - - Fn::GetAtt: [MedicalAppointmentsTable, Arn]
-                  - "/*"
+                  - "/index/InsuredIdIndex"
         - Effect: Allow
           Action:
             - sns:Publish
@@ -167,6 +167,8 @@ resources:
       Properties:
         AttributeDefinitions:
           - AttributeName: id
+            AttributeType: S
+          - AttributeName: insuredId
             AttributeType: S
         KeySchema:
           - AttributeName: id
